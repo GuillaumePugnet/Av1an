@@ -1,4 +1,10 @@
-use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use std::fmt::Write;
+use std::time::Duration;
+
+use indicatif::{
+  HumanBytes, HumanDuration, MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState,
+  ProgressStyle,
+};
 use once_cell::sync::OnceCell;
 
 use crate::util::printable_base10_digits;
@@ -9,9 +15,9 @@ const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏  ";
 const INDICATIF_PROGRESS_TEMPLATE: &str = if cfg!(windows) {
   // Do not use a spinner on Windows since the default console cannot display
   // the characters used for the spinner
-  "{elapsed_precise:.bold} ▕{wide_bar:.blue/white.dim}▏ {percent:.bold}  {pos} ({fps:.bold}, eta {eta}{msg})"
+  "{elapsed_precise:.bold} ▕{wide_bar:.blue/white.dim}▏ {percent:.bold}  {pos} ({fps:.bold}, eta {fixed_eta}{msg})"
 } else {
-  "{spinner:.green.bold} {elapsed_precise:.bold} ▕{wide_bar:.blue/white.dim}▏ {percent:.bold}  {pos} ({fps:.bold}, eta {eta}{msg})"
+  "{spinner:.green.bold} {elapsed_precise:.bold} ▕{wide_bar:.blue/white.dim}▏ {percent:.bold}  {pos} ({fps:.bold}, eta {fixed_eta}{msg})"
 };
 
 const INDICATIF_SPINNER_TEMPLATE: &str = if cfg!(windows) {
@@ -31,14 +37,38 @@ pub fn get_progress_bar() -> Option<&'static ProgressBar> {
 fn pretty_progress_style() -> ProgressStyle {
   ProgressStyle::default_bar()
     .template(INDICATIF_PROGRESS_TEMPLATE)
-    .with_key("fps", |state| match state.per_sec() {
-      fps if fps.abs() < f64::EPSILON => "0 fps".into(),
-      fps if fps < 1.0 => format!("{:.2} s/fr", 1.0 / fps),
-      fps => format!("{:.2} fps", fps),
+    .unwrap()
+    .with_key("fps", |state: &ProgressState, w: &mut dyn Write| {
+      if state.pos() == 0 || state.elapsed().as_secs_f32() < f32::EPSILON {
+        write!(w, "0 fps").unwrap();
+      } else {
+        let fps = state.pos() as f32 / state.elapsed().as_secs_f32();
+        if fps < 1.0 {
+          write!(w, "{:.2} s/fr", 1.0 / fps).unwrap();
+        } else {
+          write!(w, "{:.2} fps", fps).unwrap();
+        }
+      }
     })
-    .with_key("pos", |state| format!("{}/{}", state.pos, state.len))
-    .with_key("percent", |state| {
-      format!("{:>3.0}%", state.fraction() * 100_f32)
+    .with_key("fixed_eta", |state: &ProgressState, w: &mut dyn Write| {
+      if state.pos() == 0 || state.elapsed().as_secs_f32() < f32::EPSILON {
+        write!(w, "unknown").unwrap();
+      } else {
+        let spf = state.elapsed().as_secs_f32() / state.pos() as f32;
+        let remaining = state.len().unwrap_or(0) - state.pos();
+        write!(
+          w,
+          "{:#}",
+          HumanDuration(Duration::from_secs_f32(spf * remaining as f32))
+        )
+        .unwrap();
+      }
+    })
+    .with_key("pos", |state: &ProgressState, w: &mut dyn Write| {
+      write!(w, "{}/{}", state.pos(), state.len().unwrap_or(0)).unwrap();
+    })
+    .with_key("percent", |state: &ProgressState, w: &mut dyn Write| {
+      write!(w, "{:>3.0}%", state.fraction() * 100_f32).unwrap();
     })
     .progress_chars(PROGRESS_CHARS)
 }
@@ -46,12 +76,22 @@ fn pretty_progress_style() -> ProgressStyle {
 fn spinner_style() -> ProgressStyle {
   ProgressStyle::default_spinner()
     .template(INDICATIF_SPINNER_TEMPLATE)
-    .with_key("fps", |state| match state.per_sec() {
-      fps if fps.abs() < f64::EPSILON => "0 fps".into(),
-      fps if fps < 1.0 => format!("{:.2} s/fr", 1.0 / fps),
-      fps => format!("{:.2} fps", fps),
+    .unwrap()
+    .with_key("fps", |state: &ProgressState, w: &mut dyn Write| {
+      if state.pos() == 0 || state.elapsed().as_secs_f32() < f32::EPSILON {
+        write!(w, "0 fps").unwrap();
+      } else {
+        let fps = state.pos() as f32 / state.elapsed().as_secs_f32();
+        if fps < 1.0 {
+          write!(w, "{:.2} s/fr", 1.0 / fps).unwrap();
+        } else {
+          write!(w, "{:.2} fps", fps).unwrap();
+        }
+      }
     })
-    .with_key("pos", |state| format!("{}", state.pos))
+    .with_key("pos", |state: &ProgressState, w: &mut dyn Write| {
+      write!(w, "{}", state.pos()).unwrap();
+    })
     .progress_chars(PROGRESS_CHARS)
 }
 
@@ -65,8 +105,8 @@ pub fn init_progress_bar(len: u64) {
     // Affects scenechange progress.
     PROGRESS_BAR.get_or_init(|| ProgressBar::new(len).with_style(spinner_style()))
   };
-  pb.set_draw_target(ProgressDrawTarget::stderr_with_hz(60));
-  pb.enable_steady_tick(100);
+  pb.set_draw_target(ProgressDrawTarget::stderr());
+  pb.enable_steady_tick(Duration::from_millis(100));
   pb.reset();
   pb.reset_eta();
   pb.reset_elapsed();
@@ -155,18 +195,22 @@ pub fn init_multi_progress_bar(len: u64, workers: usize, total_chunks: usize) {
     for _ in 1..=workers {
       let pb = ProgressBar::hidden()
         // no spinner on windows, so we remove the prefix to line up with the progress bar
-        .with_style(ProgressStyle::default_spinner().template(if cfg!(windows) {
-          "{prefix:.dim} {msg}"
-        } else {
-          "  {prefix:.dim} {msg}"
-        }));
+        .with_style(
+          ProgressStyle::default_spinner()
+            .template(if cfg!(windows) {
+              "{prefix:.dim} {msg}"
+            } else {
+              "  {prefix:.dim} {msg}"
+            })
+            .unwrap(),
+        );
       pb.set_prefix(format!("[Idle  {width:width$}]", width = digits));
       pbs.push(mpb.add(pb));
     }
 
     let pb = ProgressBar::hidden();
     pb.set_style(pretty_progress_style());
-    pb.enable_steady_tick(100);
+    pb.enable_steady_tick(Duration::from_millis(100));
     pb.reset_elapsed();
     pb.reset_eta();
     pb.set_position(0);
@@ -174,7 +218,7 @@ pub fn init_multi_progress_bar(len: u64, workers: usize, total_chunks: usize) {
     pb.reset();
     pbs.push(mpb.add(pb));
 
-    mpb.set_draw_target(ProgressDrawTarget::stderr_with_hz(60));
+    mpb.set_draw_target(ProgressDrawTarget::stderr());
 
     (mpb, pbs)
   });

@@ -9,8 +9,12 @@ repository = "https://github.com/master-of-zen/Av1an"
 keywords = ["video"]
 categories = ["command-line-utilities"]
 license = "GPL-3.0"
-rust-version = "1.59"
+rust-version = "1.63"
 edition = "2021"
+
+[[bin]]
+name = "av1an"
+path = "src/main.rs"
 
 [dependencies]
 atty = "0.2.14"
@@ -38,4 +42,5 @@ package = "ffmpeg-next"
 version = "5.1.1"
 
 [features]
-ffmpeg_static = ["ffmpeg/static", "ffmpeg/build"]
+default = []
+ffmpeg_static = ["ffmpeg/static", "ffmpeg/build", "av1an-core/ffmpeg_static"]
